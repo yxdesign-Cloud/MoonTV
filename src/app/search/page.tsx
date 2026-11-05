@@ -17,6 +17,38 @@ import { SearchResult } from '@/lib/types';
 import PageLayout from '@/components/PageLayout';
 import VideoCard from '@/components/VideoCard';
 
+// 缓存探测窗口：CDN 命中通常 10~40ms，超过该时间说明未命中，转流式渐进渲染
+const CACHE_PROBE_TIMEOUT_MS = 1500;
+
+function sortSearchResults(results: SearchResult[], query: string) {
+  const keyword = query.trim();
+  return [...results].sort((a: SearchResult, b: SearchResult) => {
+    // 优先排序：标题与搜索词完全一致的排在前面
+    const aExactMatch = a.title === keyword;
+    const bExactMatch = b.title === keyword;
+
+    if (aExactMatch && !bExactMatch) return -1;
+    if (!aExactMatch && bExactMatch) return 1;
+
+    // 如果都匹配或都不匹配，则按原来的逻辑排序
+    if (a.year === b.year) {
+      return a.title.localeCompare(b.title);
+    } else {
+      // 处理 unknown 的情况
+      if (a.year === 'unknown' && b.year === 'unknown') {
+        return 0;
+      } else if (a.year === 'unknown') {
+        return 1; // a 排在后面
+      } else if (b.year === 'unknown') {
+        return -1; // b 排在后面
+      } else {
+        // 都是数字年份，按数字大小排序（大的在前面）
+        return parseInt(a.year) > parseInt(b.year) ? -1 : 1;
+      }
+    }
+  });
+}
+
 function SearchPageClient() {
   // 搜索历史
   const [searchHistory, setSearchHistory] = useState<string[]>([]);
@@ -158,45 +190,110 @@ function SearchPageClient() {
     }
   }, [searchParams]);
 
+  // 命中 CDN 缓存时直接取聚合结果（毫秒级）
+  const fetchFromCache = async (
+    query: string
+  ): Promise<SearchResult[] | null> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CACHE_PROBE_TIMEOUT_MS);
+    try {
+      const response = await fetch(
+        `/api/search?q=${encodeURIComponent(query.trim())}`,
+        { signal: controller.signal }
+      );
+      if (!response.ok) return null;
+      const data = await response.json();
+      if (!data || !Array.isArray(data.results)) return null;
+      return data.results as SearchResult[];
+    } catch (error) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // 未命中缓存时走流式接口，哪个源先返回就先渲染哪个源的结果
+  const fetchFromStream = async (query: string) => {
+    const response = await fetch(
+      `/api/search?q=${encodeURIComponent(query.trim())}&stream=1`
+    );
+    if (!response.ok || !response.body) {
+      throw new Error('流式搜索失败');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const collected: SearchResult[] = [];
+    let buffer = '';
+    let firstChunkShown = false;
+
+    // 首个数据块到达即结束加载态，后续结果继续追加
+    const revealFirstChunk = () => {
+      if (!firstChunkShown) {
+        firstChunkShown = true;
+        setIsLoading(false);
+        setShowResults(true);
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        let chunk: any;
+        try {
+          chunk = JSON.parse(trimmed);
+        } catch (error) {
+          continue;
+        }
+
+        if (chunk.done) continue;
+
+        revealFirstChunk();
+
+        if (Array.isArray(chunk.results) && chunk.results.length > 0) {
+          collected.push(...chunk.results);
+          setSearchResults(sortSearchResults(collected, query));
+        }
+      }
+    }
+
+    revealFirstChunk();
+    if (collected.length === 0) {
+      setSearchResults([]);
+    }
+  };
+
   const fetchSearchResults = async (query: string) => {
     try {
       setIsLoading(true);
-      const response = await fetch(
-        `/api/search?q=${encodeURIComponent(query.trim())}`
-      );
-      const data = await response.json();
-      setSearchResults(
-        data.results.sort((a: SearchResult, b: SearchResult) => {
-          // 优先排序：标题与搜索词完全一致的排在前面
-          const aExactMatch = a.title === query.trim();
-          const bExactMatch = b.title === query.trim();
+      setShowResults(false);
+      setSearchResults([]);
 
-          if (aExactMatch && !bExactMatch) return -1;
-          if (!aExactMatch && bExactMatch) return 1;
+      // 第一步：缓存优先，命中 CDN 缓存时几乎瞬时返回
+      const cachedResults = await fetchFromCache(query);
+      if (cachedResults) {
+        setSearchResults(sortSearchResults(cachedResults, query));
+        setShowResults(true);
+        setIsLoading(false);
+        return;
+      }
 
-          // 如果都匹配或都不匹配，则按原来的逻辑排序
-          if (a.year === b.year) {
-            return a.title.localeCompare(b.title);
-          } else {
-            // 处理 unknown 的情况
-            if (a.year === 'unknown' && b.year === 'unknown') {
-              return 0;
-            } else if (a.year === 'unknown') {
-              return 1; // a 排在后面
-            } else if (b.year === 'unknown') {
-              return -1; // b 排在后面
-            } else {
-              // 都是数字年份，按数字大小排序（大的在前面）
-              return parseInt(a.year) > parseInt(b.year) ? -1 : 1;
-            }
-          }
-        })
-      );
-      setShowResults(true);
+      // 第二步：缓存未命中，走渐进式渲染，先到的源先上屏
+      await fetchFromStream(query);
     } catch (error) {
       setSearchResults([]);
     } finally {
       setIsLoading(false);
+      setShowResults(true);
     }
   };
 

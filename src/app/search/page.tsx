@@ -368,9 +368,9 @@ function SearchPageClient() {
                     key={`search-skeleton-${index}`}
                     className='w-full animate-pulse'
                   >
-                    <div className='aspect-[2/3] w-full rounded-lg bg-gray-200 dark:bg-gray-700'></div>
-                    <div className='mt-3 h-4 w-4/5 rounded bg-gray-200 dark:bg-gray-700'></div>
-                    <div className='mt-2 h-3 w-2/5 rounded bg-gray-200 dark:bg-gray-700'></div>
+                    <div className='aspect-[2/3] w-full rounded-lg bg-gray-200 ring-1 ring-black/5 dark:bg-gray-600 dark:ring-white/10'></div>
+                    <div className='mt-3 h-4 w-4/5 rounded bg-gray-200 dark:bg-gray-500'></div>
+                    <div className='mt-2 h-3 w-2/5 rounded bg-gray-200 dark:bg-gray-500'></div>
                   </div>
                 ))}
               </div>

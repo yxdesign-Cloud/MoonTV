@@ -236,9 +236,14 @@ function SearchPageClient() {
       }
     };
 
-    while (true) {
+    // 逐块读取 NDJSON 流，读到 done 标记或流结束为止
+    let streamEnded = false;
+    while (!streamEnded) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        streamEnded = true;
+        break;
+      }
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');

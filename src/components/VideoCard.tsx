@@ -3,7 +3,7 @@
 import { CheckCircle, Heart, Link, PlayCircleIcon } from 'lucide-react';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   deleteFavorite,
@@ -111,6 +111,33 @@ export default function VideoCard({
       ? 'movie'
       : 'tv'
     : type;
+
+  // 封面加载：失败后自动重试一次（换掉可能已被缓存的失败响应），
+  // 仍失败则显示“封面加载失败”占位，避免一直转骨架屏看起来像没数据
+  const [imgSrc, setImgSrc] = useState(() => processImageUrl(actualPoster));
+  const [imgFailed, setImgFailed] = useState(false);
+  const imgRetryRef = useRef(0);
+
+  useEffect(() => {
+    imgRetryRef.current = 0;
+    setImgFailed(false);
+    setIsLoading(false);
+    setImgSrc(processImageUrl(actualPoster));
+  }, [actualPoster]);
+
+  const handleImgError = useCallback(() => {
+    if (imgRetryRef.current === 0) {
+      imgRetryRef.current = 1;
+      const separator = actualPoster && actualPoster.includes('?') ? '&' : '?';
+      setTimeout(() => {
+        setImgSrc(
+          `${processImageUrl(actualPoster)}${separator}_retry=${Date.now()}`
+        );
+      }, 800);
+      return;
+    }
+    setImgFailed(true);
+  }, [actualPoster]);
 
   // 获取收藏状态
   useEffect(() => {
@@ -275,16 +302,28 @@ export default function VideoCard({
       {/* 海报容器 */}
       <div className='relative aspect-[2/3] overflow-hidden rounded-lg'>
         {/* 骨架屏 */}
-        {!isLoading && <ImagePlaceholder aspectRatio='aspect-[2/3]' />}
+        {!isLoading && !imgFailed && (
+          <ImagePlaceholder aspectRatio='aspect-[2/3]' />
+        )}
+        {/* 图片加载失败占位 */}
+        {imgFailed && (
+          <div className='absolute inset-0 flex items-center justify-center bg-gray-200 px-2 text-center text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400'>
+            封面加载失败
+          </div>
+        )}
         {/* 图片 */}
-        <Image
-          src={processImageUrl(actualPoster)}
-          alt={actualTitle}
-          fill
-          className='object-cover'
-          referrerPolicy='no-referrer'
-          onLoadingComplete={() => setIsLoading(true)}
-        />
+        {!imgFailed && (
+          <Image
+            src={imgSrc}
+            alt={actualTitle}
+            fill
+            sizes='(max-width: 640px) 96px, 176px'
+            className='object-cover'
+            referrerPolicy='no-referrer'
+            onError={handleImgError}
+            onLoadingComplete={() => setIsLoading(true)}
+          />
+        )}
 
         {/* 悬浮遮罩 */}
         <div className='absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 transition-opacity duration-300 ease-in-out group-hover:opacity-100' />

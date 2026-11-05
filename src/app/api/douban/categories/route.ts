@@ -22,7 +22,9 @@ interface DoubanCategoryApiResponse {
 // 上游豆瓣接口在境外访问时经常超过 10s，旧实现在 abort 后直接返回 500，
 // 用户要白等 10–15s 且失败结果不缓存，「最新」「美剧」「国产剧」等分类每次访问都失败。
 // 这里改为：更短的超时 + 上一次成功结果兜底 + 失败也返回可短缓存的 200 响应。
-const UPSTREAM_TIMEOUT_MS = 4000;
+const UPSTREAM_TIMEOUT_MS = 4500;
+// 豆瓣 rexxar 接口偶发抽风，单次超时就判死会让首页三块区域同时空白，这里补一次重试
+const MAX_UPSTREAM_ATTEMPTS = 2;
 const DEGRADED_TTL_SECONDS = 60;
 const EMPTY_TTL_SECONDS = 20;
 
@@ -68,11 +70,14 @@ function buildCacheHeaders(cacheTime: number) {
 }
 
 async function fetchDoubanData(
-  url: string
+  url: string,
+  attempt = 1
 ): Promise<DoubanCategoryApiResponse> {
   // 添加超时控制
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  const cacheBuster = attempt > 1 ? `${url.includes('?') ? '&' : '?'}t=${Date.now()}` : '';
+  const requestUrl = `${url}${cacheBuster}`;
 
   // 设置请求选项，包括信号和头部
   const fetchOptions = {
@@ -88,7 +93,7 @@ async function fetchDoubanData(
 
   try {
     // 尝试直接访问豆瓣API
-    const response = await fetch(url, fetchOptions);
+    const response = await fetch(requestUrl, fetchOptions);
     clearTimeout(timeoutId);
 
     if (!response.ok) {
@@ -147,8 +152,24 @@ export async function GET(request: Request) {
   const fallbackKey = `${kind}|${category}|${type}|${pageStart}|${pageLimit}`;
 
   try {
-    // 调用豆瓣 API
-    const doubanData = await fetchDoubanData(target);
+    // 调用豆瓣 API（失败自动重试一次，降低首页分类整块空白的概率）
+    let doubanData: DoubanCategoryApiResponse | null = null;
+    let upstreamError: Error | null = null;
+    for (let attempt = 1; attempt <= MAX_UPSTREAM_ATTEMPTS; attempt++) {
+      try {
+        doubanData = await fetchDoubanData(target, attempt);
+        upstreamError = null;
+        break;
+      } catch (err) {
+        upstreamError = err as Error;
+        if (attempt < MAX_UPSTREAM_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+      }
+    }
+    if (!doubanData) {
+      throw upstreamError || new Error('上游无响应');
+    }
 
     // 转换数据格式
     const list: DoubanItem[] = doubanData.items.map((item) => ({
@@ -175,10 +196,11 @@ export async function GET(request: Request) {
     // 上游超时或报错时不再抛 500：优先用实例内上一次成功结果兜底，
     // 没有兜底数据则返回空列表，并只做很短时间的缓存，避免把空结果长期固化。
     const fallbackList = readGoodResults(fallbackKey);
-    const degraded: DoubanResult = {
+    const degraded: DoubanResult & { degraded?: boolean } = {
       code: 200,
       message: fallbackList.length > 0 ? '获取成功（暂用上次数据）' : '暂无数据',
       list: fallbackList,
+      degraded: true,
     };
     const degradedTtl =
       fallbackList.length > 0 ? DEGRADED_TTL_SECONDS : EMPTY_TTL_SECONDS;

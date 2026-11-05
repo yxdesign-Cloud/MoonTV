@@ -59,42 +59,84 @@ function HomeClient() {
 
   const [favoriteItems, setFavoriteItems] = useState<FavoriteItem[]>([]);
 
-  useEffect(() => {
-    const fetchDoubanData = async () => {
-      try {
-        setLoading(true);
+  // 分类数据整体重试计数
+  const [reloadKey, setReloadKey] = useState(0);
 
-        // 并行获取热门电影、热门剧集和热门综艺
-        const [moviesData, tvShowsData, varietyShowsData] = await Promise.all([
-          getDoubanCategories({
-            kind: 'movie',
-            category: '热门',
-            type: '全部',
-          }),
-          getDoubanCategories({ kind: 'tv', category: 'tv', type: 'tv' }),
-          getDoubanCategories({ kind: 'tv', category: 'show', type: 'show' }),
+  useEffect(() => {
+    let cancelled = false;
+
+    /**
+     * 单个分类的加载：失败或返回空列表时自动重试一次。
+     * 旧实现用 Promise.all，任一分类抛错会导致三块区域全部不渲染，
+     * 首页分类就整块空白；这里改为各自独立加载，互不影响。
+     */
+    const loadSection = async (params: {
+      kind: 'movie' | 'tv';
+      category: string;
+      type: string;
+    }): Promise<DoubanItem[]> => {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const data = await getDoubanCategories(params);
+          if (
+            data &&
+            data.code === 200 &&
+            Array.isArray(data.list) &&
+            data.list.length > 0
+          ) {
+            return data.list;
+          }
+        } catch (error) {
+          console.error('获取豆瓣分类数据失败:', params, error);
+        }
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+        }
+      }
+      return [];
+    };
+
+    const fetchDoubanData = async () => {
+      setLoading(true);
+      try {
+        const [movies, tvShows, varietyShows] = await Promise.all([
+          loadSection({ kind: 'movie', category: '热门', type: '全部' }),
+          loadSection({ kind: 'tv', category: 'tv', type: 'tv' }),
+          loadSection({ kind: 'tv', category: 'show', type: 'show' }),
         ]);
 
-        if (moviesData.code === 200) {
-          setHotMovies(moviesData.list);
-        }
+        if (cancelled) return;
 
-        if (tvShowsData.code === 200) {
-          setHotTvShows(tvShowsData.list);
-        }
-
-        if (varietyShowsData.code === 200) {
-          setHotVarietyShows(varietyShowsData.list);
-        }
+        setHotMovies(movies);
+        setHotTvShows(tvShows);
+        setHotVarietyShows(varietyShows);
       } catch (error) {
         console.error('获取豆瓣数据失败:', error);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
     fetchDoubanData();
-  }, []);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadKey]);
+
+  // 分类区块空态：给出可见提示与重试入口，不再是一片空白
+  const renderSectionEmpty = (label: string) => (
+    <div className='flex min-w-full h-[160px] flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-gray-300 text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400'>
+      <span>{label}加载失败</span>
+      <button
+        type='button'
+        onClick={() => setReloadKey((key) => key + 1)}
+        className='rounded-md border border-gray-300 px-3 py-1 text-xs text-gray-600 hover:bg-gray-100 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800'
+      >
+        重新加载
+      </button>
+    </div>
+  );
 
   // 处理收藏数据更新的函数
   const updateFavoriteItems = async (allFavorites: Record<string, any>) => {
@@ -241,8 +283,9 @@ function HomeClient() {
                           <div className='mt-2 h-4 bg-gray-200 rounded animate-pulse dark:bg-gray-800'></div>
                         </div>
                       ))
-                    : // 显示真实数据
-                      hotMovies.map((movie, index) => (
+                    : hotMovies.length === 0
+                      ? renderSectionEmpty('热门电影')
+                      : hotMovies.map((movie, index) => (
                         <div
                           key={index}
                           className='min-w-[96px] w-24 sm:min-w-[180px] sm:w-44'
@@ -289,8 +332,9 @@ function HomeClient() {
                           <div className='mt-2 h-4 bg-gray-200 rounded animate-pulse dark:bg-gray-800'></div>
                         </div>
                       ))
-                    : // 显示真实数据
-                      hotTvShows.map((show, index) => (
+                    : hotTvShows.length === 0
+                      ? renderSectionEmpty('热门剧集')
+                      : hotTvShows.map((show, index) => (
                         <div
                           key={index}
                           className='min-w-[96px] w-24 sm:min-w-[180px] sm:w-44'
@@ -336,8 +380,9 @@ function HomeClient() {
                           <div className='mt-2 h-4 bg-gray-200 rounded animate-pulse dark:bg-gray-800'></div>
                         </div>
                       ))
-                    : // 显示真实数据
-                      hotVarietyShows.map((show, index) => (
+                    : hotVarietyShows.length === 0
+                      ? renderSectionEmpty('热门综艺')
+                      : hotVarietyShows.map((show, index) => (
                         <div
                           key={index}
                           className='min-w-[96px] w-24 sm:min-w-[180px] sm:w-44'

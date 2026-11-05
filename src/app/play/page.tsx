@@ -75,6 +75,11 @@ function PlayPageClient() {
   // 跳过检查的时间间隔控制
   const lastSkipCheckRef = useRef(0);
 
+  // 跳过片头片尾的一次性执行保护（按集索引记录，避免坏配置反复跳转/暂停）
+  const introSkipAppliedRef = useRef(-1);
+  const outroHandledRef = useRef(-1);
+  const sanitizedDurationRef = useRef({ idx: -1, duration: 0 });
+
   // 去广告开关（从 localStorage 继承，默认 true）
   const [blockAdEnabled, setBlockAdEnabled] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
@@ -112,6 +117,14 @@ function PlayPageClient() {
   }, [needPrefer]);
   // 集数相关
   const [currentEpisodeIndex, setCurrentEpisodeIndex] = useState(0);
+
+  // 换集后重置跳过保护标记，保证每集都能正常跳过一次
+  useEffect(() => {
+    introSkipAppliedRef.current = -1;
+    outroHandledRef.current = -1;
+    sanitizedDurationRef.current = { idx: -1, duration: 0 };
+    lastSkipCheckRef.current = 0;
+  }, [currentEpisodeIndex]);
 
   const currentSourceRef = useRef(currentSource);
   const currentIdRef = useRef(currentId);
@@ -489,14 +502,18 @@ function PlayPageClient() {
               : `${formatTime(skipConfigRef.current.intro_time)}`,
           onClick: function () {
             const currentTime = artPlayerRef.current?.currentTime || 0;
-            if (currentTime > 0) {
-              const newConfig = {
-                ...skipConfigRef.current,
-                intro_time: currentTime,
-              };
-              handleSkipConfigChange(newConfig);
-              return `${formatTime(currentTime)}`;
+            const duration = artPlayerRef.current?.duration || 0;
+            const check = validateSkipSetting('intro', currentTime, duration);
+            if (!check.ok) {
+              artPlayerRef.current.notice.show = check.message;
+              return undefined;
             }
+            const newConfig = {
+              ...skipConfigRef.current,
+              intro_time: currentTime,
+            };
+            handleSkipConfigChange(newConfig);
+            return `${formatTime(currentTime)}`;
           },
         });
         artPlayerRef.current.setting.update({
@@ -508,19 +525,20 @@ function PlayPageClient() {
               ? '设置片尾时间'
               : `-${formatTime(-skipConfigRef.current.outro_time)}`,
           onClick: function () {
-            const outroTime =
-              -(
-                artPlayerRef.current?.duration -
-                artPlayerRef.current?.currentTime
-              ) || 0;
-            if (outroTime < 0) {
-              const newConfig = {
-                ...skipConfigRef.current,
-                outro_time: outroTime,
-              };
-              handleSkipConfigChange(newConfig);
-              return `-${formatTime(-outroTime)}`;
+            const currentTime = artPlayerRef.current?.currentTime || 0;
+            const duration = artPlayerRef.current?.duration || 0;
+            const check = validateSkipSetting('outro', currentTime, duration);
+            if (!check.ok) {
+              artPlayerRef.current.notice.show = check.message;
+              return undefined;
             }
+            const outroTime = -(duration - currentTime);
+            const newConfig = {
+              ...skipConfigRef.current,
+              outro_time: outroTime,
+            };
+            handleSkipConfigChange(newConfig);
+            return `-${formatTime(-outroTime)}`;
           },
         });
       } else {
@@ -534,6 +552,34 @@ function PlayPageClient() {
     } catch (err) {
       console.error('保存跳过片头片尾配置失败:', err);
     }
+  };
+
+  // 校验片头/片尾设置是否合理，避免写入会把整集跳掉、或一开播就命中的坏配置
+  const validateSkipSetting = (
+    kind: 'intro' | 'outro',
+    currentTime: number,
+    duration: number
+  ): { ok: boolean; message: string } => {
+    if (!isFinite(duration) || duration <= 0) {
+      return { ok: false, message: '视频时长未知，请等广告/片头加载完再设置' };
+    }
+    if (kind === 'intro') {
+      if (currentTime <= 1) {
+        return { ok: false, message: '请先把进度拖到片头结束的位置' };
+      }
+      if (currentTime >= duration * 0.5) {
+        return { ok: false, message: '片头不能超过本集时长的一半' };
+      }
+      return { ok: true, message: '' };
+    }
+    const remain = duration - currentTime;
+    if (remain <= 10) {
+      return { ok: false, message: '请把进度拖到片尾开始的位置再设置' };
+    }
+    if (remain > duration * 0.5) {
+      return { ok: false, message: '片尾不能超过本集时长的一半' };
+    }
+    return { ok: true, message: '' };
   };
 
   const formatTime = (seconds: number): string => {
@@ -1376,14 +1422,18 @@ function PlayPageClient() {
                 : `${formatTime(skipConfigRef.current.intro_time)}`,
             onClick: function () {
               const currentTime = artPlayerRef.current?.currentTime || 0;
-              if (currentTime > 0) {
-                const newConfig = {
-                  ...skipConfigRef.current,
-                  intro_time: currentTime,
-                };
-                handleSkipConfigChange(newConfig);
-                return `${formatTime(currentTime)}`;
+              const duration = artPlayerRef.current?.duration || 0;
+              const check = validateSkipSetting('intro', currentTime, duration);
+              if (!check.ok) {
+                artPlayerRef.current.notice.show = check.message;
+                return undefined;
               }
+              const newConfig = {
+                ...skipConfigRef.current,
+                intro_time: currentTime,
+              };
+              handleSkipConfigChange(newConfig);
+              return `${formatTime(currentTime)}`;
             },
           },
           {
@@ -1395,19 +1445,20 @@ function PlayPageClient() {
                 ? '设置片尾时间'
                 : `-${formatTime(-skipConfigRef.current.outro_time)}`,
             onClick: function () {
-              const outroTime =
-                -(
-                  artPlayerRef.current?.duration -
-                  artPlayerRef.current?.currentTime
-                ) || 0;
-              if (outroTime < 0) {
-                const newConfig = {
-                  ...skipConfigRef.current,
-                  outro_time: outroTime,
-                };
-                handleSkipConfigChange(newConfig);
-                return `-${formatTime(-outroTime)}`;
+              const currentTime = artPlayerRef.current?.currentTime || 0;
+              const duration = artPlayerRef.current?.duration || 0;
+              const check = validateSkipSetting('outro', currentTime, duration);
+              if (!check.ok) {
+                artPlayerRef.current.notice.show = check.message;
+                return undefined;
               }
+              const outroTime = -(duration - currentTime);
+              const newConfig = {
+                ...skipConfigRef.current,
+                outro_time: outroTime,
+              };
+              handleSkipConfigChange(newConfig);
+              return `-${formatTime(-outroTime)}`;
             },
           },
         ],
@@ -1471,41 +1522,84 @@ function PlayPageClient() {
 
         const currentTime = artPlayerRef.current.currentTime || 0;
         const duration = artPlayerRef.current.duration || 0;
+        // 时长还没拿到时不要做任何跳过判定，否则会把整集当成片头/片尾
+        if (!isFinite(duration) || duration <= 0) return;
+
+        const episodeIndex = currentEpisodeIndexRef.current;
+
+        // 本集首次拿到有效时长时，清洗与本集时长明显不符的坏配置
+        // （旧版本里「设置片尾」可能写入接近全长的值，只要开关打开就会一开播就命中暂停）
+        const sanitized = sanitizedDurationRef.current;
+        if (
+          sanitized.idx !== episodeIndex ||
+          Math.abs(sanitized.duration - duration) > 1
+        ) {
+          sanitizedDurationRef.current = { idx: episodeIndex, duration };
+          const cfg = skipConfigRef.current;
+          let introTime = cfg.intro_time;
+          let outroTime = cfg.outro_time;
+          let dirty = false;
+          if (introTime > 0 && introTime >= duration * 0.5) {
+            introTime = 0;
+            dirty = true;
+          }
+          if (outroTime < 0 && -outroTime >= duration * 0.5) {
+            outroTime = 0;
+            dirty = true;
+          }
+          if (dirty) {
+            handleSkipConfigChange({
+              ...cfg,
+              intro_time: introTime,
+              outro_time: outroTime,
+            });
+            artPlayerRef.current.notice.show =
+              '跳过片头片尾配置与本集时长不符，已自动重置';
+            return;
+          }
+        }
+
         const now = Date.now();
 
         // 限制跳过检查频率为1.5秒一次
         if (now - lastSkipCheckRef.current < 1500) return;
         lastSkipCheckRef.current = now;
 
-        // 跳过片头
+        // 跳过片头：每集只执行一次，且片头时间必须小于本集时长的一半
         if (
           skipConfigRef.current.intro_time > 0 &&
-          currentTime < skipConfigRef.current.intro_time
+          skipConfigRef.current.intro_time < duration * 0.5 &&
+          currentTime < skipConfigRef.current.intro_time &&
+          introSkipAppliedRef.current !== episodeIndex
         ) {
+          introSkipAppliedRef.current = episodeIndex;
           artPlayerRef.current.currentTime = skipConfigRef.current.intro_time;
           artPlayerRef.current.notice.show = `已跳过片头 (${formatTime(
             skipConfigRef.current.intro_time
           )})`;
         }
 
-        // 跳过片尾
+        // 跳过片尾：每集只判定一次，避免坏配置导致反复暂停 / 反复跳集
         if (
           skipConfigRef.current.outro_time < 0 &&
-          duration > 0 &&
-          currentTime >
-            artPlayerRef.current.duration + skipConfigRef.current.outro_time
+          -skipConfigRef.current.outro_time < duration * 0.5 &&
+          outroHandledRef.current !== episodeIndex
         ) {
-          if (
-            currentEpisodeIndexRef.current <
-            (detailRef.current?.episodes?.length || 1) - 1
-          ) {
-            handleNextEpisode();
-          } else {
-            artPlayerRef.current.pause();
+          const outroStart = duration + skipConfigRef.current.outro_time;
+          if (currentTime >= outroStart) {
+            outroHandledRef.current = episodeIndex;
+            artPlayerRef.current.notice.show = `已跳过片尾 (${formatTime(
+              skipConfigRef.current.outro_time
+            )})`;
+            if (
+              currentEpisodeIndexRef.current <
+              (detailRef.current?.episodes?.length || 1) - 1
+            ) {
+              handleNextEpisode();
+            } else {
+              artPlayerRef.current.pause();
+            }
           }
-          artPlayerRef.current.notice.show = `已跳过片尾 (${formatTime(
-            skipConfigRef.current.outro_time
-          )})`;
         }
       });
 

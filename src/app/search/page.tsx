@@ -18,7 +18,7 @@ import PageLayout from '@/components/PageLayout';
 import VideoCard from '@/components/VideoCard';
 
 // 缓存探测窗口：CDN 命中通常 10~40ms，超过该时间说明未命中，转流式渐进渲染
-const CACHE_PROBE_TIMEOUT_MS = 1500;
+const CACHE_PROBE_TIMEOUT_MS = 500;
 
 function sortSearchResults(results: SearchResult[], query: string) {
   const keyword = query.trim();
@@ -357,8 +357,23 @@ function SearchPageClient() {
         {/* 搜索结果或搜索历史 */}
         <div className='max-w-[95%] mx-auto mt-12 overflow-visible'>
           {isLoading ? (
-            <div className='flex justify-center items-center h-40'>
-              <div className='animate-spin rounded-full h-8 w-8 border-b-2 border-green-500'></div>
+            <div className='w-full'>
+              <div className='mb-8 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400'>
+                <div className='animate-spin rounded-full h-4 w-4 border-b-2 border-green-500'></div>
+                <span>正在搜索，各资源站的结果会陆续出现…</span>
+              </div>
+              <div className='justify-start grid grid-cols-3 gap-x-2 gap-y-14 sm:gap-y-20 px-0 sm:px-2 sm:grid-cols-[repeat(auto-fill,_minmax(11rem,_1fr))] sm:gap-x-8'>
+                {Array.from({ length: 12 }, (_, index) => (
+                  <div
+                    key={`search-skeleton-${index}`}
+                    className='w-full animate-pulse'
+                  >
+                    <div className='aspect-[2/3] w-full rounded-lg bg-gray-200 dark:bg-gray-700'></div>
+                    <div className='mt-3 h-4 w-4/5 rounded bg-gray-200 dark:bg-gray-700'></div>
+                    <div className='mt-2 h-3 w-2/5 rounded bg-gray-200 dark:bg-gray-700'></div>
+                  </div>
+                ))}
+              </div>
             </div>
           ) : showResults ? (
             <section className='mb-12'>

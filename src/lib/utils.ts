@@ -28,8 +28,27 @@ export function getImageProxyUrl(): string | null {
     : null;
 }
 
+// 这些站点有防盗链（豆瓣原图直连会返回 418），必须借代理带上 Referer 才能取到图
+const PROXY_REQUIRED_HOSTS = ['doubanio.com', 'douban.com'];
+
 /**
- * 处理图片 URL，如果设置了图片代理则使用代理
+ * 判断图片域名是否必须走代理（防盗链站点）
+ */
+export function isProxyRequiredHost(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return PROXY_REQUIRED_HOSTS.some(
+      (h) => host === h || host.endsWith(`.${h}`)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 处理图片 URL：仅防盗链站点走代理，其余直连。
+ * 代理 Worker 带有域名白名单，未放通的资源站域名会返回 403 forbidden host 并挂起 10s+，
+ * 而这些图直连只需几毫秒，因此不再对全部图片无差别套代理。
  */
 export function processImageUrl(originalUrl: string): string {
   if (!originalUrl) return originalUrl;
@@ -37,7 +56,26 @@ export function processImageUrl(originalUrl: string): string {
   const proxyUrl = getImageProxyUrl();
   if (!proxyUrl) return originalUrl;
 
+  if (!isProxyRequiredHost(originalUrl)) return originalUrl;
+
   return `${proxyUrl}${encodeURIComponent(originalUrl)}`;
+}
+
+/**
+ * 封面加载候选链：首选地址加载失败后依次回退，代理与原图直连互为备份
+ */
+export function getImageUrlCandidates(originalUrl: string): string[] {
+  if (!originalUrl) return [];
+
+  const proxyUrl = getImageProxyUrl();
+  if (!proxyUrl) return [originalUrl];
+
+  const proxied = `${proxyUrl}${encodeURIComponent(originalUrl)}`;
+  const direct = originalUrl;
+
+  return isProxyRequiredHost(originalUrl)
+    ? [proxied, direct]
+    : [direct, proxied];
 }
 
 /**

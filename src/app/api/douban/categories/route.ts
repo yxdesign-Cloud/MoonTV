@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextResponse } from 'next/server';
 
 import { getCacheTime } from '@/lib/config';
@@ -26,7 +27,7 @@ const UPSTREAM_TIMEOUT_MS = 4500;
 // 豆瓣 rexxar 接口偶发抽风，单次超时就判死会让首页三块区域同时空白，这里补一次重试
 const MAX_UPSTREAM_ATTEMPTS = 2;
 const DEGRADED_TTL_SECONDS = 60;
-const EMPTY_TTL_SECONDS = 20;
+const EMPTY_TTL_SECONDS = 0; // 空结果不做 CDN 缓存，避免一次抖动把“暂无数据”固化住
 
 // Edge Runtime 实例内保留各分类最近一次成功结果，供上游超时时兜底
 const lastGoodResults = new Map<
@@ -107,6 +108,115 @@ async function fetchDoubanData(
   }
 }
 
+async function fetchJsonAny(url: string): Promise<any> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        Referer: 'https://movie.douban.com/',
+        Accept: 'application/json, text/plain, */*',
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP error! Status: ${response.status}`);
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// 主源 recent_hot 在 Vercel Edge 出口常被豆瓣限速超时，这里准备一组数据集重合度高的备用源：
+// 剧集/综艺用 subject_collection 的 tv_hot、show_hot，电影用实时热门榜。
+function buildFallbackTargets(
+  kind: string,
+  category: string | null,
+  pageStart: number,
+  pageLimit: number
+): string[] {
+  const lowered = (category || '').toLowerCase();
+  const targets: string[] = [];
+
+  if (kind === 'tv') {
+    const collection = lowered.includes('show') ? 'show_hot' : 'tv_hot';
+    targets.push(
+      `https://m.douban.com/rexxar/api/v2/subject_collection/${collection}/items?start=${pageStart}&count=${pageLimit}`
+    );
+  } else {
+    targets.push(
+      `https://m.douban.com/rexxar/api/v2/subject_collection/movie_real_time_hotest/items?start=${pageStart}&count=${pageLimit}`
+    );
+    targets.push(
+      `https://movie.douban.com/j/search_subjects?type=movie&tag=${encodeURIComponent('热门')}&page_limit=${pageLimit}&page_start=${pageStart}`
+    );
+  }
+
+  return targets;
+}
+
+// 兼容 subject_collection 与 search_subjects 两套返回结构
+function parseFallbackItems(payload: any): DoubanItem[] {
+  const list: DoubanItem[] = [];
+
+  const items = payload?.subject_collection_items || payload?.items || [];
+  for (const item of items) {
+    const poster = item?.pic?.normal || item?.pic?.large || '';
+    if (!item?.id || !poster) {
+      continue;
+    }
+    list.push({
+      id: String(item.id),
+      title: item.title || '',
+      poster,
+      rate: item?.rating?.value ? Number(item.rating.value).toFixed(1) : '',
+      year: String(
+        item?.year || item?.card_subtitle?.match(/(\d{4})/)?.[1] || ''
+      ),
+    });
+  }
+
+  const subjects = payload?.subjects || [];
+  for (const item of subjects) {
+    if (!item?.id || !item?.cover) {
+      continue;
+    }
+    list.push({
+      id: String(item.id),
+      title: item.title || '',
+      poster: item.cover,
+      rate: item?.rate ? String(item.rate) : '',
+      year: String(String(item.title || '').match(/(\d{4})/)?.[1] || ''),
+    });
+  }
+
+  return list;
+}
+
+async function fetchFallbackList(
+  kind: string,
+  category: string | null,
+  pageStart: number,
+  pageLimit: number
+): Promise<DoubanItem[]> {
+  const targets = buildFallbackTargets(kind, category, pageStart, pageLimit);
+  for (const target of targets) {
+    try {
+      const payload = await fetchJsonAny(target);
+      const list = parseFallbackItems(payload);
+      if (list.length > 0) {
+        return list;
+      }
+    } catch {
+      // 备用源失败则继续尝试下一个
+    }
+  }
+  return [];
+}
+
 export const runtime = 'edge';
 
 export async function GET(request: Request) {
@@ -168,17 +278,45 @@ export async function GET(request: Request) {
       }
     }
     if (!doubanData) {
+      // 主源超时/报错：先尝试备用数据集，仍无数据才进入降级逻辑
+      const fallbackList = await fetchFallbackList(
+        kind,
+        category,
+        pageStart,
+        pageLimit
+      );
+      if (fallbackList.length > 0) {
+        rememberGoodResults(fallbackKey, fallbackList);
+        const cacheTime = await getCacheTime();
+        return NextResponse.json(
+          { code: 200, message: '获取成功（备用数据源）', list: fallbackList },
+          { headers: buildCacheHeaders(cacheTime) }
+        );
+      }
       throw upstreamError || new Error('上游无响应');
     }
 
     // 转换数据格式
-    const list: DoubanItem[] = doubanData.items.map((item) => ({
+    let list: DoubanItem[] = doubanData.items.map((item) => ({
       id: item.id,
       title: item.title,
       poster: item.pic?.normal || item.pic?.large || '',
       rate: item.rating?.value ? item.rating.value.toFixed(1) : '',
       year: item.card_subtitle?.match(/(\d{4})/)?.[1] || '',
     }));
+
+    if (list.length === 0) {
+      // 主源返回空列表（该分类偶发无数据），用备用源补齐，避免首页整块空白
+      const fallbackList = await fetchFallbackList(
+        kind,
+        category,
+        pageStart,
+        pageLimit
+      );
+      if (fallbackList.length > 0) {
+        list = fallbackList;
+      }
+    }
 
     rememberGoodResults(fallbackKey, list);
 

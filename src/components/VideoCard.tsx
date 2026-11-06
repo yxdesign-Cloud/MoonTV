@@ -14,7 +14,7 @@ import {
   subscribeToDataUpdates,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
-import { processImageUrl } from '@/lib/utils';
+import { getImageUrlCandidates } from '@/lib/utils';
 
 import { ImagePlaceholder } from '@/components/ImagePlaceholder';
 
@@ -114,7 +114,9 @@ export default function VideoCard({
 
   // 封面加载：失败后自动重试一次（换掉可能已被缓存的失败响应），
   // 仍失败则显示“封面加载失败”占位，避免一直转骨架屏看起来像没数据
-  const [imgSrc, setImgSrc] = useState(() => processImageUrl(actualPoster));
+  const [imgSrc, setImgSrc] = useState(
+    () => getImageUrlCandidates(actualPoster)[0] || ''
+  );
   const [imgFailed, setImgFailed] = useState(false);
   const imgRetryRef = useRef(0);
 
@@ -122,18 +124,16 @@ export default function VideoCard({
     imgRetryRef.current = 0;
     setImgFailed(false);
     setIsLoading(false);
-    setImgSrc(processImageUrl(actualPoster));
+    setImgSrc(getImageUrlCandidates(actualPoster)[0] || '');
   }, [actualPoster]);
 
+  // 封面加载：按候选链逐级回退（原图直连与代理互为备份），全部失败才显示占位
   const handleImgError = useCallback(() => {
-    if (imgRetryRef.current === 0) {
-      imgRetryRef.current = 1;
-      const separator = actualPoster && actualPoster.includes('?') ? '&' : '?';
-      setTimeout(() => {
-        setImgSrc(
-          `${processImageUrl(actualPoster)}${separator}_retry=${Date.now()}`
-        );
-      }, 800);
+    const candidates = getImageUrlCandidates(actualPoster);
+    const next = imgRetryRef.current + 1;
+    if (next < candidates.length) {
+      imgRetryRef.current = next;
+      setTimeout(() => setImgSrc(candidates[next]), 300);
       return;
     }
     setImgFailed(true);
